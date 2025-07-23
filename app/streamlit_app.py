@@ -1,11 +1,11 @@
-
 import streamlit as st  
+import os
 from functions import *
 import base64
 
 # Initialize the API key in session state if it doesn't exist
-if 'api_key' not in st.session_state:
-    st.session_state.api_key = ''
+if 'huggingface_token' not in st.session_state:
+    st.session_state.huggingface_token = os.environ.get('HUGGINGFACE_TOKEN')
 
 def display_pdf(uploaded_file):
 
@@ -60,31 +60,114 @@ def load_streamlit_page():
 
     return col1, col2, uploaded_file
 
+# Add two tabs to the page
+tab1, tab2 = st.tabs(["LLM Tool", "RAG Tool"])
 
-# Make a streamlit page
-col1, col2, uploaded_file = load_streamlit_page()
+with tab1:
+    st.title("LLM Tool")
+    # Make a streamlit page
+    col1, col2, uploaded_file = load_streamlit_page()
 
-# Process the input
-if uploaded_file is not None:
-    with col2:
-        display_pdf(uploaded_file)
+    # Process the input
+    if uploaded_file is not None:
+        with col2:
+            display_pdf(uploaded_file)
+            
+        # Load in the documents
+        documents = get_pdf_text(uploaded_file)
+        st.success("Input loaded successfully")
+
+        st.session_state.vector_store = create_vectorstore_from_texts(documents, 
+                                                                    api_key=None,
+                                                                    file_name=uploaded_file.name
+                                                                    )
+        st.success("Input Processed")
+
+    # Generate answer
+    with col1:
+        if st.button("Generate table"):
+            with st.spinner("Generating answer"):
+                # Load vectorstore:
+
+                answer, aux = query_document(vectorstore = st.session_state.vector_store, 
+                                        query = "Give me the title, summary, publication date, and authors of the research paper.",
+                                        api_key = None)
+                                
+                placeholder = st.empty()
+                st.write(answer)
+                st.warning(format_docs(aux))
         
-    # Load in the documents
-    documents = get_pdf_text(uploaded_file)
-    st.session_state.vector_store = create_vectorstore_from_texts(documents, 
-                                                                  api_key=st.session_state.api_key,
-                                                                  file_name=uploaded_file.name)
-    st.write("Input Processed")
+        #insert a text input box to ask a question
+        question = st.text_input("Ask a question about the document:"
+                                 , placeholder="What is the main topic of the document?"
+                                 , key="question_input"
+                                 )
+        
+        if st.button("Ask question"):
+            with st.spinner("Generating answer"):
+                if question:
+                    #llm = ChatOllama(model="llama3.1")  # Local model
 
-# Generate answer
-with col1:
-    if st.button("Generate table"):
-        with st.spinner("Generating answer"):
-            # Load vectorstore:
+                    all_metas = st.session_state.vector_store._collection.get(include=["metadatas"])["metadatas"]
+                    pages = sorted(set(meta["page"] for meta in all_metas if "page" in meta))
+                    st.success(pages)
 
-            answer = query_document(vectorstore = st.session_state.vector_store, 
-                                    query = "Give me the title, summary, publication date, and authors of the research paper.",
-                                    api_key = st.session_state.api_key)
-                            
-            placeholder = st.empty()
-            placeholder = st.write(answer)
+                    retriever = st.session_state.vector_store.as_retriever(search_type="similarity"
+                                                                           , search_kwargs={
+                                                                                   'filter': {'page_label':{"$in": ["1"]}}
+                                                                                   }
+                                                                           )
+
+                    retrieved_docs = retriever.get_relevant_documents(question)
+
+                    # Print to inspect
+                    for i, doc in enumerate(retrieved_docs):
+                        st.write(f"\n--- Document {i} ---")
+                        st.write(doc.page_content)  # preview first 500 characters
+                        st.write("Metadata:", doc.metadata)
+
+                    #st.write(retrieved_docs)
+
+                    results = st.session_state.vector_store._collection.get(
+                                    where={"page_label": "1"},
+                                    include=["documents", "metadatas"]
+                                )
+                    
+                    docs = results["documents"]
+                    metas = results["metadatas"]
+
+                    df = pd.DataFrame({
+                        "chunk": docs,
+                        "page": [meta.get("page") for meta in metas],
+                        "chunk_index": [meta.get("chunk_index", 0) for meta in metas]
+                    })
+                    df_sorted = df.sort_values(by="chunk_index").reset_index(drop=True)
+                    st.dataframe(df_sorted)  # Or print(df_sorted)
+
+
+
+                else:
+                    st.error("Please enter a question.")
+
+with tab2:
+    st.title("RAG Tool")
+    if False:
+        # Get the top N relevant chunks
+        docs = retriever.get_relevant_documents(query)
+        n = 5  # or make this adjustable with a Streamlit slider
+
+        # Convert chunks to a DataFrame
+        chunk_data = []
+        for i, doc in enumerate(docs[:n]):
+            chunk_data.append({
+                "Chunk #": i + 1,
+                "Page": doc.metadata.get("page", "N/A"),
+                "Source": doc.metadata.get("source", "N/A"),
+                "Content": doc.page_content[:1000]  # truncate for readability
+            })
+
+        df_chunks = pd.DataFrame(chunk_data)
+
+        # Display in Streamlit
+        st.subheader("🔍 Retrieved Chunks for Manual Inspection")
+        st.dataframe(df_chunks, use_container_width=True)
